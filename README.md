@@ -1,5 +1,18 @@
 # Audio/Spectrogram Analysis Tool
 
+<!-- repository-status:start -->
+## Repository status
+
+This repository is private.
+
+- The current state is **partial application**.
+- The repository contains a Next.js spectrogram and waveform interface.
+- The frontend passed a production build in the previous audit.
+- The README previously described a FastAPI backend, but the backend source is not in this repository.
+- Publication decision: **Add the backend or document the repository as a frontend before publication.**
+<!-- repository-status:end -->
+
+
 A full-stack application for visualizing and analyzing audio files, featuring a Laplacian Pyramid-based spectrogram viewer.
 
 ## Quick Start
