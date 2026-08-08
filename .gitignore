@@ -18,7 +18,8 @@ dist/
 # Mac
 .DS_Store
 
-# IDE
+# Local agent and editor configuration
+.agent/
 .vscode/
 .idea/
 
