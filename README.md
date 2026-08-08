@@ -5,6 +5,11 @@ I built the viewer as the visual front end for Project Chimera audio experiments
 
 The spectrogram maps complex FFT phase to hue and magnitude to brightness. Controls expose gamma, brightness, the decibel floor, linear or logarithmic frequency scale, pyramid resolution, active channels, playhead locking, and linked time/frequency zoom.
 
+![Spectrogram Viewer rendering a synthetic harmonic sweep](docs/spectrogram_viewer.jpg)
+
+The screenshot uses generated harmonic and transient data from a temporary
+test service; it contains no source recording or private audio.
+
 ## What you can explore
 
 - Browse audio files reported by the analysis service.
