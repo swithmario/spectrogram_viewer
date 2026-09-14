@@ -7,6 +7,8 @@ import axios from 'axios';
 import { OrthographicCamera } from '@react-three/drei';
 import WaveformDisplay from './WaveformDisplay';
 import AudioPlayer from './AudioPlayer';
+import { API_BASE } from '../lib/api';
+import WindowControls from './window_controls';
 
 // Vertex Shader: Standard Quad
 const vertexShader = `
@@ -29,6 +31,9 @@ uniform float uScale;
 uniform float uFreqOffset;
 uniform float uFreqScale;
 uniform float uLogScale; // 0.0 = Linear, 1.0 = Log
+uniform float uMaxFreq;
+uniform vec2 uTextureSize;
+uniform float uTimeBins;
 varying vec2 vUv;
 
 // HSV to RGB helper
@@ -51,7 +56,7 @@ void main() {
         float fEndNorm = uFreqOffset + uFreqScale;
         
         // Safe minimum to avoid log(0) - 20Hz / 22050Hz
-        float minSafe = 20.0 / 22050.0; 
+        float minSafe = 20.0 / uMaxFreq;
         
         float fStart = max(fStartNorm, minSafe);
         float fEnd = max(fEndNorm, minSafe);
@@ -70,7 +75,9 @@ void main() {
         return;
     }
 
-    vec2 uv = vec2(u, v);
+    // Map physical frame/bin centers to texture texel centers.
+    vec2 uv = vec2((u * uTimeBins + 0.5) / uTextureSize.x,
+                   (v * (uTextureSize.y - 1.0) + 0.5) / uTextureSize.y);
     
     // Nearest neighbor sampling is enforced by texture filter
     vec4 valReal = texture2D(uReal, uv);
@@ -81,11 +88,15 @@ void main() {
     
     // Magnitude and Phase
     float mag = sqrt(real * real + imag * imag);
+    if (mag <= 1e-10) {
+        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
     float phase = atan(imag, real);
     
     // Phase -> Hue
     float hue = (phase + 3.14159265) / (2.0 * 3.14159265);
-    float sat = 0.85;
+    float sat = 1.0;
     
     // dB scaling for visibility
     float eps = 1e-10;
@@ -141,20 +152,28 @@ interface ViewerProps {
 // Lifted loading state to parent
 // Lifted loading state to parent
 
-const SpectrogramPlane = ({ filePath, M, timeStart, timeEnd, duration, freqStart, freqEnd, maxFreq, locked, gamma = 1.0, brightness = 1.0, dbFloor = -80, channels, setLoading, logScale = false, currentTime }: ViewerProps & { setLoading: (l: boolean) => void, currentTime: number }) => {
+const SpectrogramPlane = ({ filePath, M, timeStart, timeEnd, duration, freqStart, freqEnd, maxFreq, locked, gamma = 1.0, brightness = 1.0, dbFloor = -80, channels, setLoading, setError, logScale = false, currentTime }: ViewerProps & { setLoading: (l: boolean) => void, setError: (error: string | null) => void, currentTime: number }) => {
     const meshRef = useRef<THREE.Mesh>(null);
     const materialRef = useRef<THREE.ShaderMaterial>(null);
-    const { viewport } = useThree();
+    const { viewport, gl } = useThree();
 
     // Data State
-    const [textures, setTextures] = useState<{ real: THREE.Texture, imag: THREE.Texture } | null>(null);
+    const [textures, setTextures] = useState<{ real: THREE.Texture, imag: THREE.Texture, width: number, height: number, timeStep: number } | null>(null);
+
+    useEffect(() => () => {
+        textures?.real.dispose();
+        textures?.imag.dispose();
+    }, [textures]);
 
     // Fetch Pyramid Data
     useEffect(() => {
         if (duration <= 0) return;
+        const controller = new AbortController();
 
         const fetchData = async () => {
             setLoading(true);
+            setError(null);
+            setTextures(null);
             try {
                 // Fetch FULL duration (0 to duration)
                 // Add timestamp to force browser to ignore cache
@@ -168,11 +187,15 @@ const SpectrogramPlane = ({ filePath, M, timeStart, timeEnd, duration, freqStart
                 if (channels && channels.length > 0) {
                     params.channels = channels.join(',');
                 }
-                const response = await axios.get(`http://localhost:8000/spectrogram`, { params });
+                const response = await axios.get(`${API_BASE}/spectrogram`, { params, signal: controller.signal });
 
                 const data = response.data;
                 const width = data.shape[1];  // Time
                 const height = data.shape[0]; // Freq
+                if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 2 ||
+                    width > gl.capabilities.maxTextureSize || height > gl.capabilities.maxTextureSize) {
+                    throw new Error('The spectrogram exceeds this GPU texture limit. Use a shorter clip or a larger FFT window.');
+                }
 
                 // Decode Base64 to Float32Array
                 const b64ToFloat32 = (b64: string) => {
@@ -187,6 +210,9 @@ const SpectrogramPlane = ({ filePath, M, timeStart, timeEnd, duration, freqStart
 
                 const realData = b64ToFloat32(data.real_b64);
                 const imagData = b64ToFloat32(data.imag_b64);
+                if (realData.length !== width * height || imagData.length !== width * height) {
+                    throw new Error('The analysis service returned incomplete spectral data.');
+                }
 
                 // Create Textures with NEAREST filtering to prevent interpolation artifacts
                 const realTex = new THREE.DataTexture(realData, width, height, THREE.RedFormat, THREE.FloatType);
@@ -199,16 +225,20 @@ const SpectrogramPlane = ({ filePath, M, timeStart, timeEnd, duration, freqStart
                 imagTex.magFilter = THREE.NearestFilter;
                 imagTex.minFilter = THREE.NearestFilter;
 
-                setTextures({ real: realTex, imag: imagTex });
+                setTextures({ real: realTex, imag: imagTex, width, height,
+                    timeStep: data.time_step ?? duration / Math.max(1, width - 1) });
 
             } catch (e) {
-                console.error("Fetch error", e);
+                if (!controller.signal.aborted) {
+                    setError(axios.isAxiosError(e) ? e.response?.data?.error ?? 'Cannot load the spectrogram. Check the local analysis service.' : String(e));
+                }
             }
-            setLoading(false);
+            if (!controller.signal.aborted) setLoading(false);
         };
 
         fetchData();
-    }, [filePath, M, channels, duration]);
+        return () => controller.abort();
+    }, [filePath, M, channels, duration, gl, setLoading, setError]);
 
     const uniforms = useMemo(() => ({
         uReal: { value: null },
@@ -220,7 +250,10 @@ const SpectrogramPlane = ({ filePath, M, timeStart, timeEnd, duration, freqStart
         uScale: { value: 1.0 },
         uFreqOffset: { value: 0.0 },
         uFreqScale: { value: 1.0 },
-        uLogScale: { value: 0.0 }
+        uLogScale: { value: 0.0 },
+        uMaxFreq: { value: 24000.0 },
+        uTextureSize: { value: new THREE.Vector2(1, 2) },
+        uTimeBins: { value: 1.0 }
     }), []);
 
     // Update uniforms every frame/render
@@ -230,18 +263,20 @@ const SpectrogramPlane = ({ filePath, M, timeStart, timeEnd, duration, freqStart
             if (textures) {
                 materialRef.current.uniforms.uReal.value = textures.real;
                 materialRef.current.uniforms.uImag.value = textures.imag;
+                materialRef.current.uniforms.uTextureSize.value.set(textures.width, textures.height);
+                materialRef.current.uniforms.uTimeBins.value = duration / textures.timeStep;
             }
             materialRef.current.uniforms.uGamma.value = gamma;
             materialRef.current.uniforms.uBrightness.value = brightness;
             materialRef.current.uniforms.uDbFloor.value = dbFloor;
             materialRef.current.uniforms.uLogScale.value = logScale ? 1.0 : 0.0;
+            materialRef.current.uniforms.uMaxFreq.value = maxFreq;
 
             let currentT = timeStart;
 
             // SMOOTH SYNC: Only use audio sync if LOCKED
             if (locked) {
                 // Poll global time for 60fps smoothness, fallback to prop
-                // @ts-expect-error - Custom global method
                 const exactTime = window.audioPlayerGetCurrentTime?.() ?? currentTime;
 
                 const windowSize = timeEnd - timeStart;
@@ -269,6 +304,7 @@ const SpectrogramPlane = ({ filePath, M, timeStart, timeEnd, duration, freqStart
     // ...
 
     // SCALE TO VIEWPORT: Ensure plane always fills the screen
+    if (!textures) return null;
     return (
         <mesh ref={meshRef} position={[0, 0, 0]} scale={[viewport.width, viewport.height, 1]}>
             <planeGeometry args={[1, 1]} />
@@ -290,13 +326,11 @@ const InteractionLayer = ({
     freqWindow,
     setFreqWindow,
     duration,
-    maxFreq,
     setPlayheadLock,
     zoomLock,
     scrubMode,
     currentTime,
-    onSeek,
-    logScale
+    onSeek
 }: {
     timeWindow: { start: number, end: number },
     setTimeWindow: (w: { start: number, end: number }) => void,
@@ -319,10 +353,10 @@ const InteractionLayer = ({
     // Update cursor based on Alt Key
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
-            if (e.altKey) gl.domElement.style.cursor = 'grab';
+            if (e.altKey) gl.domElement.style.setProperty('cursor', 'grab');
         };
         const handleKeyUp = () => {
-            gl.domElement.style.cursor = 'default';
+            gl.domElement.style.setProperty('cursor', 'default');
             isDragging.current = false; // Stop dragging if key released
         };
 
@@ -339,7 +373,7 @@ const InteractionLayer = ({
         if (scrubMode) {
             isDragging.current = true;
             lastX.current = e.clientX; // Capture start position
-            gl.domElement.style.cursor = 'grabbing';
+            gl.domElement.style.setProperty('cursor', 'grabbing');
 
             // "Tape Style" Scrubbing:
             // We lock the playhead to the center (or current relative pos)
@@ -355,14 +389,14 @@ const InteractionLayer = ({
         isDragging.current = true;
         lastX.current = e.clientX;
         lastY.current = e.clientY;
-        gl.domElement.style.cursor = 'grabbing';
+        gl.domElement.style.setProperty('cursor', 'grabbing');
         setPlayheadLock(false); // Unlock on interaction
         e.stopPropagation(); // Prevent default text selection etc
     };
 
     const onPointerUp = () => {
         isDragging.current = false;
-        gl.domElement.style.cursor = 'grab';
+        gl.domElement.style.setProperty('cursor', 'grab');
         // If we were scrubbing, we might want to release lock?
         // User probably wants to stay locked if they were cleaning.
         // Let's leave it as is.
@@ -391,7 +425,7 @@ const InteractionLayer = ({
             // Safety check: if Alt released but no keyup event (e.g. out of focus), stop
             if (!e.altKey) {
                 isDragging.current = false;
-                gl.domElement.style.cursor = 'default';
+                gl.domElement.style.setProperty('cursor', 'default');
                 return;
             }
 
@@ -451,7 +485,7 @@ const InteractionLayer = ({
         if (!e.altKey) return;
 
         const wheelEvent = e.nativeEvent;
-        const zoomFactor = 1 + wheelEvent.deltaY * 0.001;
+        const zoomFactor = Math.exp(Math.max(-1, Math.min(1, wheelEvent.deltaY * 0.001)));
 
         // CHECK MODIFIERS for Uniform Zoom
         // Explicit Zoom Lock OR Meta/Ctrl Key
@@ -534,7 +568,7 @@ const InteractionLayer = ({
 const PhaseLegend = () => {
     const gradientStops = Array.from({ length: 13 }, (_, i) => {
         const hue = (i / 12) * 360;
-        return `hsl(${hue}, 85%, 50%)`;
+        return `hsl(${hue}, 100%, 50%)`;
     }).join(', ');
 
     return (
@@ -592,8 +626,9 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
     const [pyramidLevels, setPyramidLevels] = useState<PyramidLevel[]>([]);
     const [selectedLevelIdx, setSelectedLevelIdx] = useState(0);
     const [timeWindow, setTimeWindow] = useState({ start: 0, end: 10 });
-    const [gamma, setGamma] = useState(0.1);
+    const [gamma, setGamma] = useState(1.0);
     const [loading, setLoading] = useState(false); // Global loading state for cache gen
+    const [error, setError] = useState<string | null>(null);
 
     // Helper to format freq for axis labels
     const formatFreq = (hz: number): string => {
@@ -610,8 +645,8 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
         return `${sign}${mins}:${secs.toString().padStart(2, '0')}`;
     };
 
-    const [brightness, setBrightness] = useState(1.5);
-    const [dbFloor, setDbFloor] = useState(-110); // dB floor for dynamic range
+    const [brightness, setBrightness] = useState(1.0);
+    const [dbFloor, setDbFloor] = useState(-80);
 
     // Multi-channel support
     const [channelInfo, setChannelInfo] = useState<ChannelInfo | null>(null);
@@ -625,10 +660,10 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
     const [duration, setDuration] = useState(0);
     const [selection, setSelection] = useState<{ start: number; end: number } | null>(null);
     const [isLooping, setIsLooping] = useState(false);
-    const [playheadLock, setPlayheadLock] = useState(true); // Lock view to playhead
+    const [playheadLock, setPlayheadLock] = useState(false);
     const [zoomLock, setZoomLock] = useState(false); // Lock Time/Freq zoom together
     const [scrubMode, setScrubMode] = useState(false); // Scroll to scrub
-    const [logScale, setLogScale] = useState(false); // Logarithmic Freq Scale
+    const [logScale, setLogScale] = useState(true);
 
     // High-frequency Playhead Update
     const playheadRef = useRef<HTMLDivElement>(null);
@@ -636,7 +671,6 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
         let frameId: number;
         const loop = () => {
             if (playheadRef.current) {
-                // @ts-expect-error - Custom global method
                 const exactTime = window.audioPlayerGetCurrentTime?.() ?? 0;
 
                 if (playheadLock) {
@@ -656,7 +690,6 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
     // Seek Helper
     const handleSeek = (time: number) => {
         setCurrentTime(time);
-        // @ts-expect-error - Calling exposed method
         window.audioPlayerSeek?.(time);
     };
 
@@ -672,46 +705,24 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
             // Standard Octave-ish steps: 20, 50, 100, 200, 500, 1k, 2k, 5k, 10k, 20k
             const steps = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
             // Filter steps within current view
-            return steps.filter(freq => freq >= currentMin && freq <= currentMax).map(f => formatFreq(f)).reverse();
+            const low = Math.max(20, currentMin);
+            const high = Math.max(low + 1, currentMax);
+            return steps.filter(freq => freq >= low && freq <= high).map(freq => ({
+                label: formatFreq(freq), position: Math.log(freq / low) / Math.log(high / low)
+            }));
         }
 
         return [1.0, 0.75, 0.5, 0.25, 0.0].map(ratio => {
             const val = currentMin + (currentMax - currentMin) * ratio;
-            return formatFreq(val);
+            return { label: formatFreq(val), position: ratio };
         });
     }, [freqWindow, channelInfo, logScale]);
-
-    // Update MaxFreq when channel info changes
-    useEffect(() => {
-        if (channelInfo && channelInfo.sample_rate) {
-            const max = channelInfo.sample_rate / 2;
-            setFreqWindow({ min: 0, max: max });
-        }
-    }, [channelInfo]);
-
-
-    // Auto-scroll when playhead lock is enabled
-    useEffect(() => {
-        if (playheadLock && duration > 0) {
-            const windowSize = timeWindow.end - timeWindow.start;
-            // Allow overscroll (negative coordinates) so playhead stays centered at edges
-            const newStart = currentTime - windowSize / 2;
-            const newEnd = newStart + windowSize;
-
-            // Only update if playhead is outside center 40% of view (tolerance)
-            const viewCenter = (timeWindow.start + timeWindow.end) / 2;
-            const tolerance = windowSize * 0.2;
-            if (Math.abs(currentTime - viewCenter) > tolerance) {
-                setTimeWindow({ start: newStart, end: newEnd });
-            }
-        }
-    }, [currentTime, playheadLock, duration]);
 
     // Fetch pyramid info on mount
     useEffect(() => {
         const fetchPyramidInfo = async () => {
             try {
-                const response = await axios.get(`http://localhost:8000/pyramid-info`, {
+                const response = await axios.get(`${API_BASE}/pyramid-info`, {
                     params: { file_path: filePath }
                 });
                 setPyramidLevels(response.data.level_info);
@@ -719,13 +730,14 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
                 // Set duration from server info if available
                 if (response.data.duration > 0) {
                     setDuration(response.data.duration);
+                    setTimeWindow({ start: 0, end: response.data.duration });
                 }
 
                 // Start at middle level
                 const midIdx = Math.floor(response.data.level_info.length / 2);
                 setSelectedLevelIdx(midIdx);
-            } catch (e) {
-                console.error("Failed to fetch pyramid info", e);
+            } catch {
+                setError('Cannot load analysis settings. Check the local analysis service.');
             }
         };
         fetchPyramidInfo();
@@ -735,7 +747,7 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
     useEffect(() => {
         const fetchAudioInfo = async () => {
             try {
-                const response = await axios.get(`http://localhost:8000/audio-info`, {
+                const response = await axios.get(`${API_BASE}/audio-info`, {
                     params: { file_path: filePath, _t: Date.now() }
                 });
                 const info = response.data.channels as ChannelInfo;
@@ -743,10 +755,11 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
                 info.sample_rate = response.data.sample_rate;
 
                 setChannelInfo(info);
+                setFreqWindow({ min: 0, max: response.data.sample_rate / 2 });
                 // Default: select all channels
                 setSelectedChannels(Array.from({ length: info.count }, (_, i) => i));
-            } catch (e) {
-                console.error("Failed to fetch audio info", e);
+            } catch {
+                setError('Cannot load audio metadata. Check the local analysis service.');
             }
         };
         fetchAudioInfo();
@@ -766,15 +779,17 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
 
     const currentLevel = pyramidLevels[selectedLevelIdx];
     const M = currentLevel?.M ?? 128;
+    const viewSpan = timeWindow.end - timeWindow.start;
+    const visibleStart = playheadLock ? currentTime - viewSpan / 2 : timeWindow.start;
 
     return (
-        <div className="w-full h-full flex flex-col bg-gray-950 text-white select-none">
+        <div className="w-full h-full flex flex-col bg-gray-950 text-white select-none overflow-y-auto">
             {/* Main Viewer Area */}
-            <div className="flex-1 relative h-full min-h-[400px] mx-6 border-x border-t border-gray-800 rounded-t-lg overflow-hidden mt-4 bg-black">
-                {/* Y-Axis (Frequency) - Simplified */}
-                <div className="absolute left-0 top-0 bottom-0 w-12 flex flex-col justify-between py-2 text-[9px] font-mono text-gray-500 z-10 pointer-events-none bg-gradient-to-r from-black/80 to-transparent">
-                    {yTicks.map((label, i) => (
-                        <span key={i} className="pl-2">{label}</span>
+            <div className="flex-1 relative min-h-[300px] mx-6 border-x border-t border-gray-800 rounded-t-lg overflow-hidden mt-4 bg-black" aria-label="Phase-colour spectrogram">
+                {/* Frequency axis in Hz; positions use the shader scale. */}
+                <div className="absolute left-0 top-0 bottom-0 w-14 text-[10px] font-mono text-gray-300 z-10 pointer-events-none bg-gradient-to-r from-black/80 to-transparent">
+                    {yTicks.map((tick, i) => (
+                        <span key={i} className="absolute left-2" style={{ bottom: `${tick.position * 100}%`, transform: `translateY(${tick.position === 0 ? 0 : 50}%)` }}>{tick.label}</span>
                     ))}
                 </div>
 
@@ -797,12 +812,13 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
                         dbFloor={dbFloor}
                         channels={selectedChannels}
                         setLoading={setLoading}
+                        setError={setError}
                         currentTime={currentTime}
                         logScale={logScale}
                     />
 
                     <InteractionLayer
-                        timeWindow={timeWindow}
+                        timeWindow={{ start: visibleStart, end: visibleStart + viewSpan }}
                         setTimeWindow={setTimeWindow}
                         freqWindow={freqWindow}
                         setFreqWindow={setFreqWindow}
@@ -822,10 +838,12 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
                     <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/20 backdrop-blur-[1px] pointer-events-none">
                         <div className="flex flex-col items-center gap-2">
                             <div className="w-8 h-8 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin"></div>
-                            <span className="text-xs text-cyan-400 font-mono bg-black/50 px-2 py-1 rounded">Generating Pyramid Cache...</span>
+                            <span className="text-xs text-cyan-400 font-mono bg-black/50 px-2 py-1 rounded">Computing complex spectrogram…</span>
                         </div>
                     </div>
                 )}
+
+                {error && <div role="alert" className="absolute inset-x-16 top-8 z-40 bg-gray-950 border border-amber-700 text-amber-200 p-4 rounded">{error}</div>}
 
                 {/* Playhead Overlay - Visual Only */}
                 {/* Playhead Overlay - Visual Only */}
@@ -843,6 +861,12 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
                 )}
             </div>
 
+            <div className="relative h-7 shrink-0 mx-6 text-[10px] text-gray-400 font-mono" aria-label="Visible time axis">
+                {[0, .25, .5, .75, 1].map(ratio => <span key={ratio} className="absolute top-1 whitespace-nowrap" style={{ left: `${ratio * 100}%`, transform: `translateX(-${ratio * 100}%)` }}>
+                    {(visibleStart + viewSpan * ratio).toFixed(2)} s
+                </span>)}
+            </div>
+
             {/* Waveform & Timeline (Single Source of Truth) */}
             <div className="mx-6 border-x border-gray-800 bg-gray-900/50">
                 <WaveformDisplay
@@ -856,7 +880,7 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
             </div>
 
             {/* Control Bar: Transport & Tools */}
-            <div className="mx-6 px-4 py-3 bg-gray-900 border-x border-b border-gray-800 rounded-b-lg flex items-center gap-4 mb-4 shadow-lg">
+            <div className="mx-6 px-4 py-3 bg-gray-900 border-x border-b border-gray-800 rounded-b-lg flex flex-wrap items-center gap-4 mb-3 shadow-lg">
                 <AudioPlayer
                     filePath={filePath}
                     channels={selectedChannels}
@@ -884,7 +908,10 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
                         Fit All
                     </button>
                     <button
-                        onClick={() => setPlayheadLock(!playheadLock)}
+                        onClick={() => {
+                            if (playheadLock) setTimeWindow({ start: visibleStart, end: visibleStart + viewSpan });
+                            setPlayheadLock(!playheadLock);
+                        }}
                         className={`px-3 py-1.5 text-xs font-medium rounded border transition-colors ${playheadLock
                             ? 'bg-amber-600/20 text-amber-500 border-amber-500/50'
                             : 'bg-gray-800 hover:bg-gray-700 text-gray-300 border-gray-700'
@@ -926,6 +953,7 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
                     </button>
                 </div>
 
+                <button disabled={!selection} onClick={() => setIsLooping(!isLooping)} aria-pressed={isLooping} className="text-xs text-gray-300 disabled:opacity-40">{isLooping ? 'Loop on' : 'Loop selection'}</button>
                 <div className="flex-1" />
 
                 {/* Legends (Consolidated) */}
@@ -936,10 +964,10 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
             </div>
 
             {/* Laplacian Pyramid Controls (Footer) */}
-            <div className="mx-6 mb-6 p-6 rounded-xl bg-gray-900/80 border border-white/5 backdrop-blur-sm shadow-2xl">
-                <div className="flex items-center justify-between mb-6">
+            <div className="mx-6 mb-4 p-4 rounded-xl bg-gray-900/80 border border-white/5">
+                <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
                     <h2 className="text-sm font-bold text-gray-400 uppercase tracking-wider">
-                        Laplacian Pyramid Controls
+                        Analysis and display
                     </h2>
                     {channelInfo?.sample_rate && (
                         <div className="text-xs font-mono text-gray-500">
@@ -948,12 +976,17 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
                     )}
                 </div>
 
+                <div className="flex flex-wrap items-end justify-between gap-4 mb-5">
+                    <WindowControls key={`${timeWindow.start}:${timeWindow.end}`} start={timeWindow.start} end={timeWindow.end} duration={duration} onApply={window => { setTimeWindow(window); setPlayheadLock(false); }} />
+                    <p className="text-[10px] text-gray-400">Alt + wheel: time zoom · Alt + drag: pan · Shift + Alt + wheel: frequency zoom</p>
+                </div>
+
                 {/* 1. The Step Slider */}
-                <div className="mb-8 relative">
+                <div className="mb-4 relative">
                     <div className="flex justify-between items-center mb-2">
-                        <span className="text-xs font-medium text-cyan-400">Scale (M)</span>
+                        <span className="text-xs font-medium text-cyan-400">FFT window</span>
                         <span className="text-xs font-mono text-gray-400">
-                            {currentLevel ? `M=${currentLevel.M} • ${(currentLevel.T_seconds * 1000).toFixed(1)}ms` : 'Loading...'}
+                            {currentLevel ? `${currentLevel.T_samples} samples · ${(currentLevel.T_seconds * 1000).toFixed(1)} ms` : 'Loading...'}
                         </span>
                     </div>
 
@@ -966,13 +999,15 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
                         {pyramidLevels.map((l, i) => (
                             <button
                                 key={i}
+                                aria-label={`FFT window ${l.T_samples} samples`}
+                                aria-pressed={i === selectedLevelIdx}
                                 onClick={() => setSelectedLevelIdx(i)}
                                 className={`relative z-10 w-3 h-3 rounded-full transition-all duration-300 focus:outline-none ${i <= selectedLevelIdx ? 'bg-cyan-900 border border-cyan-700' : 'bg-gray-800 border border-gray-700'
                                     } hover:scale-150 group`}
                             >
                                 {/* Tooltip */}
                                 <span className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 bg-gray-800 text-[9px] text-white px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 whitespace-nowrap pointer-events-none transition-opacity">
-                                    M={l.M}
+                                    {l.T_samples} samples
                                 </span>
                             </button>
                         ))}
@@ -989,8 +1024,8 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
                         )}
                     </div>
                     <div className="flex justify-between text-[10px] text-gray-600 font-mono mt-1">
-                        <span>High Detail (Global)</span>
-                        <span>High Temporal (Transients)</span>
+                        <span>Short window · transient detail</span>
+                        <span>Long window · frequency detail</span>
                     </div>
                 </div>
 
@@ -1010,12 +1045,13 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
                         </div>
                         <input
                             type="range"
-                            min="0.001"
-                            max="0.1"
-                            step="0.001"
+                            aria-label="Intensity gamma"
+                            min="0.2"
+                            max="3"
+                            step="0.05"
                             value={gamma}
                             onChange={(e) => setGamma(parseFloat(e.target.value))}
-                            onDoubleClick={() => setGamma(0.1)}
+                            onDoubleClick={() => setGamma(1.0)}
                             className="w-full h-1.5 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-white hover:accent-cyan-400 transition-all"
                             title="Double-click to reset"
                         />
@@ -1036,6 +1072,7 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
                         </div>
                         <input
                             type="range"
+                            aria-label="Brightness"
                             min="0"
                             max="10"
                             step="0.05"
@@ -1062,6 +1099,7 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
                         </div>
                         <input
                             type="range"
+                            aria-label="Decibel floor"
                             min="-120"
                             max="-20"
                             step="1"
@@ -1076,7 +1114,7 @@ export default function SpectrogramViewer({ filePath }: { filePath: string }) {
 
                 {/* Channels (If Multi-channel) */}
                 {channelInfo && channelInfo.count > 1 && (
-                    <div className="mt-6 pt-6 border-t border-white/5">
+                    <div className="mt-4 pt-3 border-t border-white/5">
                         <label className="block text-xs font-medium mb-3 text-gray-400">
                             Active Channels ({channelInfo.count}ch)
                         </label>
