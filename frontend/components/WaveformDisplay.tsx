@@ -2,6 +2,7 @@
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import axios from 'axios';
+import { API_BASE } from '../lib/api';
 
 interface WaveformData {
     duration: number;
@@ -44,7 +45,7 @@ export default function WaveformDisplay({
                 if (channels && channels.length > 0) {
                     params.channels = channels.join(',');
                 }
-                const response = await axios.get('http://localhost:8000/waveform', { params });
+                const response = await axios.get(`${API_BASE}/waveform`, { params });
                 setWaveformData(response.data);
             } catch (e) {
                 console.error('Failed to fetch waveform', e);

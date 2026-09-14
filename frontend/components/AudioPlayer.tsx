@@ -2,6 +2,8 @@
 
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 
+import { API_BASE } from '../lib/api';
+
 interface AudioPlayerProps {
     filePath: string;
     channels?: number[];
@@ -24,20 +26,14 @@ export default function AudioPlayer({
     const audioRef = useRef<HTMLAudioElement>(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [currentTime, setCurrentTime] = useState(0);
-    const [duration, setDuration] = useState(0);
+    const [loadedDuration, setDuration] = useState(0);
+    const duration = loadedDuration > 0 ? loadedDuration : externalDuration ?? 0;
     const [volume, setVolume] = useState(0.8);
-
-    // Sync external duration if internal is missing
-    useEffect(() => {
-        if (externalDuration && externalDuration > 0 && (duration === 0 || !Number.isFinite(duration))) {
-            setDuration(externalDuration);
-        }
-    }, [externalDuration, duration]);
 
     // Create audio URL from file path, including channel selection if provided
     const audioUrl = channels && channels.length > 0
-        ? `http://localhost:8000/audio-stream?file_path=${encodeURIComponent(filePath)}&channels=${channels.join(',')}`
-        : `http://localhost:8000/audio-stream?file_path=${encodeURIComponent(filePath)}`;
+        ? `${API_BASE}/audio-stream?file_path=${encodeURIComponent(filePath)}&channels=${channels.join(',')}`
+        : `${API_BASE}/audio-stream?file_path=${encodeURIComponent(filePath)}`;
 
     // Handle time update
     const handleTimeUpdate = useCallback(() => {
@@ -89,20 +85,23 @@ export default function AudioPlayer({
     };
 
     // Seek to position
-    const seekTo = (time: number) => {
+    const seekTo = useCallback((time: number) => {
         const audio = audioRef.current;
         if (!audio) return;
         audio.currentTime = time;
         setCurrentTime(time);
-    };
+        onTimeUpdate?.(time);
+    }, [onTimeUpdate]);
 
     // Expose seekTo and getCurrentTime for parent/siblings
     useEffect(() => {
-        // @ts-expect-error - Adding method to window for parent access
         window.audioPlayerSeek = seekTo;
-        // @ts-expect-error - Adding method to window for high-freq polling
         window.audioPlayerGetCurrentTime = () => audioRef.current?.currentTime || 0;
-    }, []);
+        return () => {
+            delete window.audioPlayerSeek;
+            delete window.audioPlayerGetCurrentTime;
+        };
+    }, [seekTo]);
 
     const formatTime = (seconds: number) => {
         if (!Number.isFinite(seconds) || isNaN(seconds)) return "0:00";
@@ -116,6 +115,7 @@ export default function AudioPlayer({
             {/* Play/Pause Button */}
             <button
                 onClick={togglePlay}
+                aria-label={isPlaying ? 'Pause audio' : 'Play audio'}
                 className="w-10 h-10 flex items-center justify-center rounded-full bg-cyan-600 hover:bg-cyan-500 transition-colors"
             >
                 {isPlaying ? (
@@ -145,7 +145,7 @@ export default function AudioPlayer({
             >
                 <div
                     className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 transition-all duration-100"
-                    style={{ width: `${(currentTime / duration) * 100}%` }}
+                    style={{ width: `${(currentTime / Math.max(duration, .001)) * 100}%` }}
                 />
             </div>
 
@@ -156,6 +156,7 @@ export default function AudioPlayer({
                 </svg>
                 <input
                     type="range"
+                    aria-label="Volume"
                     min="0"
                     max="1"
                     step="0.05"
