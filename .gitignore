@@ -36,3 +36,7 @@ dist/
 *.aiff
 *.aac
 *.wma
+
+# External macOS volumes and local build state
+._*
+*.tsbuildinfo
