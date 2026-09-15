@@ -57,7 +57,7 @@ There is no vendored source. Read `backend/requirements.txt` for Python requirem
 
 - Keep this repository public. Do not import private source, recordings, caches, or datasets.
 - Application screenshots must come from the running viewer. Retain the command and input provenance.
-- The owner-approved `docs/historical_multi_window_spectrogram.png` is a separate retained magnitude plot. Its source recording is unknown. Do not relabel it as a phase-colour application screenshot or a new execution.
+- The approved `docs/historical_multi_window_spectrogram.png` is a separate retained magnitude plot. Its source recording is unknown. Do not relabel it as a phase-colour application screenshot or a new execution.
 - The built-in synthesized reference phrase is permitted for public examples.
 - Keep environments and generated audio outside Git.
 - Keep canonical source in the registered repository. SSD worktrees are temporary development locations.
@@ -80,3 +80,16 @@ extending scientific claims. Review any private-to-public extraction separately.
 `docs/multi_resolution_research.md` is the public research summary and historical
 figure. The detailed experiment plan remains FS035 in private `future_scope_ideas`.
 Recognition and waveform reconstruction have separate acceptance criteria.
+
+## Documentation and Git identity
+
+Use first person for personal decisions and experience in README prose. Use
+direct technical language for software behaviour and instructions. Do not
+describe the maintainer as "the owner". Preserve quoted source wording and
+technical ownership terms.
+
+Local commits must use `swithmario` and
+`28229111+swithmario@users.noreply.github.com`. Verify both author and committer
+before pushing. Histories were corrected on 15SEP2026; compare an older checkout
+with the corrected remote before merging or pushing it. Record Mac Mini M4 in
+commits made on this machine.
