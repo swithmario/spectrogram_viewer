@@ -56,7 +56,8 @@ There is no vendored source. Read `backend/requirements.txt` for Python requirem
 ## Public boundary and constraints
 
 - Keep this repository public. Do not import private source, recordings, caches, or datasets.
-- Screenshots must come from the running viewer. Retain the command and input provenance.
+- Application screenshots must come from the running viewer. Retain the command and input provenance.
+- The owner-approved `docs/historical_multi_window_spectrogram.png` is a separate retained magnitude plot. Its source recording is unknown. Do not relabel it as a phase-colour application screenshot or a new execution.
 - The built-in synthesized reference phrase is permitted for public examples.
 - Keep environments and generated audio outside Git.
 - Keep canonical source in the registered repository. SSD worktrees are temporary development locations.
@@ -75,3 +76,7 @@ view. Browser playback uses a mono mix. These are prototype limitations.
 Next work: recover the original backend with verified provenance, or design bounded
 time-frequency tile loading. Add independent numerical reference comparisons before
 extending scientific claims. Review any private-to-public extraction separately.
+
+`docs/multi_resolution_research.md` is the public research summary and historical
+figure. The detailed experiment plan remains FS035 in private `future_scope_ideas`.
+Recognition and waveform reconstruction have separate acceptance criteria.

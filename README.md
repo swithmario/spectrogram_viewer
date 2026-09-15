@@ -100,6 +100,14 @@ can cancel. This viewer does not perform source separation.
 See the [STFT definition in the SciPy documentation](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.stft.html)
 and [SoundFile's supported input interface](https://python-soundfile.readthedocs.io/en/latest/).
 
+## Multi-window research
+
+An earlier study inspected the same ten-second passage with four FFT windows.
+The proposed extension combines these views to identify musical events and
+guide later unmixing. Read the [multi-resolution research note](docs/multi_resolution_research.md)
+for the retained figure, the three time scales, and separate recognition and
+reconstruction goals.
+
 ## Service contract
 
 The default service address is `http://127.0.0.1:8000`. Set
